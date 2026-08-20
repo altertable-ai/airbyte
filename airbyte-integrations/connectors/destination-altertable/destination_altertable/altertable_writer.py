@@ -1,11 +1,14 @@
 # Copyright (c) 2026 Airbyte, Inc., all rights reserved.
 
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from importlib.metadata import version
+from typing import Any, Dict, Iterator, Optional
 
 import altertable_flightsql
 import pyarrow as pa
+import pyarrow.flight as flight
 from altertable_flightsql.client import IngestIncrementalOptions, IngestTableMode
 
 from airbyte_cdk.models import (
@@ -23,6 +26,21 @@ from .type_conversion import convert_to_arrow
 MAX_BATCH_SIZE = 256 * 1024 * 1024
 
 
+@contextmanager
+def _flight_user_agent(client_name: str) -> Iterator[None]:
+    original = flight.FlightClient
+
+    def named_client(*args, generic_options=None, **kwargs):
+        options = [*(generic_options or []), ("grpc.primary_user_agent", client_name)]
+        return original(*args, generic_options=options, **kwargs)
+
+    flight.FlightClient = named_client
+    try:
+        yield
+    finally:
+        flight.FlightClient = original
+
+
 @dataclass(frozen=True)
 class AirbyteStream:
     name: str
@@ -34,15 +52,17 @@ class AirbyteStream:
 
 class AltertableWriter:
     def __init__(self, config: Dict[str, Any]):
-        self.client = altertable_flightsql.Client(
-            username=config["username"],
-            password=config["password"],
-            host=config["host"],
-            port=config["port"],
-            tls=config.get("tls", True),
-            catalog=config.get("catalog"),
-            schema=config.get("schema"),
-        )
+        client_name = f"airbyte-destination-altertable/{version('destination-altertable')}"
+        with _flight_user_agent(client_name):
+            self.client = altertable_flightsql.Client(
+                username=config["username"],
+                password=config["password"],
+                host=config["host"],
+                port=config["port"],
+                tls=config.get("tls", True),
+                catalog=config.get("catalog"),
+                schema=config.get("schema"),
+            )
 
         self.config = config
         self.buffer = defaultdict(list)
